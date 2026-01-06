@@ -1,10 +1,10 @@
-import re
 import logging
-from typing import Optional, Tuple
-import xml.etree.ElementTree as ET
-from utils.config import Config
+import re
 import time
-from typing import Iterable, Union
+import xml.etree.ElementTree as ET
+from typing import Iterable, Optional, Tuple, Union
+
+from utils.config import Config
 
 CFG = Config()
 
@@ -245,35 +245,15 @@ def get_facebook_id_via_ocr(d, reader, log: logging.Logger) -> Optional[str]:
     return None
 
 
-def jump_to_chat_by_id(
-    d,
-    user_id: str,
-    log: logging.Logger,
-    message: Optional[str] = "hihi",
-    *,
-    messages: Optional[Iterable[str]] = None,
-    delay_between_sends_s: float = 0.4,
-) -> bool:
+def jump_to_chat_by_id(d, user_id: str, log: logging.Logger) -> bool:
     """
-    Deep link vào chat, gửi 1 hoặc nhiều tin nhắn.
-
-    - Nếu truyền messages=[...]: sẽ gửi lần lượt từng phần tử.
-    - Nếu không truyền messages: dùng message (chuỗi) như cũ.
+    Chỉ thực hiện Deep Link để mở khung chat với user_id.
+    Trả về True nếu thấy ô nhập tin nhắn xuất hiện.
     """
-    to_send: list[str] = []
-    if messages is not None:
-        to_send = [m for m in messages if m is not None and str(m).strip() != ""]
-    else:
-        if message is not None and str(message).strip() != "":
-            to_send = [str(message)]
-
-    if not to_send:
-        log.warning("Không có message nào để gửi.")
-        return False
-
     log.info("Đang nhảy tới khung chat của: %s", user_id)
 
     url = f"https://m.me/{user_id}"
+    # com.facebook.orca là package của Messenger, giúp tránh mở nhầm bằng Chrome
     cmd = f'am start -a android.intent.action.VIEW -d "{url}" com.facebook.orca'
 
     try:
@@ -284,45 +264,80 @@ def jump_to_chat_by_id(
 
     log.info("Đang chờ Messenger load giao diện chat...")
 
-    if not d.xpath(CFG.chat_input_xpath).wait(timeout=CFG.wait_ui_timeout_s):
+    # Chờ ô nhập tin nhắn xuất hiện
+    if d.xpath(CFG.chat_input_xpath).wait(timeout=CFG.wait_ui_timeout_s):
+        log.info("Đã vào khung chat thành công.")
+        time.sleep(1.0) # Chờ UI ổn định thêm chút
+        return True
+    else:
         log.error("Chờ %.0fs vẫn không thấy ô 'Nhắn tin'.", CFG.wait_ui_timeout_s)
         return False
 
+
+def send_messages(
+    d,
+    log: logging.Logger,
+    messages: Optional[Iterable[str]] = None,
+    message: Optional[str] = None,
+    delay_between_sends_s: float = 0.5
+) -> bool:
+    """
+    Hàm chỉ thực hiện nhập và gửi tin nhắn (yêu cầu đang ở trong khung chat).
+    """
+    # 1. Chuẩn bị danh sách tin nhắn
+    to_send: list[str] = []
+    if messages is not None:
+        to_send = [str(m) for m in messages if m is not None and str(m).strip() != ""]
+    elif message is not None and str(message).strip() != "":
+        to_send = [str(message)]
+
+    if not to_send:
+        log.warning("Không có nội dung tin nhắn nào để gửi.")
+        return False
+
     try:
-        # focus input 1 lần
-        d.xpath(CFG.chat_input_xpath).click()
-        time.sleep(0.6)
+        # Focus vào ô nhập một lần đầu
+        if d.xpath(CFG.chat_input_xpath).exists:
+            d.xpath(CFG.chat_input_xpath).click()
+            time.sleep(0.5)
+        else:
+            log.error("Không tìm thấy ô nhập tin nhắn để gửi.")
+            return False
 
+        # 2. Vòng lặp gửi từng tin
         for i, msg in enumerate(to_send, start=1):
-            log.info("[send %d/%d] Nhập: %r", i, len(to_send), msg)
+            log.info("[Send %d/%d] Nhập: %r", i, len(to_send), msg)
 
+            # Nhập text
             d.send_keys(msg)
-            time.sleep(0.3)
+            time.sleep(0.5) # Chờ nút gửi hiện ra/active
 
-            log.info("[send %d/%d] Bấm Gửi...", i, len(to_send))
+            log.info("[Send %d/%d] Bấm Gửi...", i, len(to_send))
+
+            # Tìm nút gửi (Ưu tiên Description -> ResourceId -> Enter Key)
             if d(description="Gửi").exists:
                 d(description="Gửi").click()
             elif d(description="Send").exists:
                 d(description="Send").click()
+            elif d(resourceId="com.facebook.orca:id/send_btn").exists:
+                d(resourceId="com.facebook.orca:id/send_btn").click()
             else:
-                log.warning("Không thấy nút Gửi -> bấm Enter.")
+                log.warning("Không thấy nút Gửi -> Bấm phím Enter.")
                 d.press("enter")
 
             time.sleep(delay_between_sends_s)
 
-            # chuẩn bị cho message tiếp theo (một số máy focus mất sau khi gửi)
+            # Click lại vào ô input để chắc chắn focus cho tin tiếp theo (phòng hờ)
             if i < len(to_send):
                 d.xpath(CFG.chat_input_xpath).click()
                 time.sleep(0.2)
 
-        log.info("HOÀN TẤT GỬI %d TIN CHO %s", len(to_send), user_id)
+        log.info("HOÀN TẤT GỬI %d TIN NHẮN.", len(to_send))
         return True
 
     except Exception as e:
         log.exception("Lỗi khi nhập/gửi tin nhắn: %s", e)
         return False
-
-
 def _iter_descendants(node: ET.Element):
     # node.iter() bao gồm cả node hiện tại; mình muốn descendants cũng ok.
     for n in node.iter():
