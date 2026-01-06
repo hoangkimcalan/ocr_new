@@ -139,22 +139,43 @@ _FB_FROM_DOMAIN_RE = re.compile(
 _FB_ID_PARAM_RE = re.compile(r"\bid[\s=]+(\d+)\b", re.IGNORECASE)
 
 
-def extract_facebook_id_from_ocr_text(text: str) -> Optional[str]:
-    normalized = " ".join((text or "").split())
+def extract_facebook_id_from_ocr_text(full_text: str) -> str | None:
+    """
+    Trích xuất ID xử lý lỗi OCR:
+    1. facebook com (mất chấm)
+    2. Dấu '/' bị đọc thành: I, l, |, 1, dấu chấm, dấu hai chấm...
+    3. ID bị ngắt dòng (thừa dấu cách).
+    """
+    
+    # --- PHÂN TÍCH REGEX "CÂN MỌI KÈO" ---
+    # facebook[\s\.]*com    : Bắt "facebook.com", "facebook com"
+    # [\s\/Il|:1\.]+        : Dấu ngăn cách. Chấp nhận: khoảng trắng, /, I, l, |, :, 1, .
+    # (.*?)                 : Lấy nội dung ID (Group 1)
+    # (?=\s*(?:Sao|Copy|$)) : Dừng khi gặp chữ "Sao", "Copy" hoặc hết dòng
+    
+    pattern = r"facebook[\s\.]*com[\s\/Il|:1\.]+(.*?)(?=\s*(?:Sao|Copy|$))"
+    
+    match = re.search(pattern, full_text, re.IGNORECASE)
+    
+    final_id = None
+    
+    if match:
+        raw_id = match.group(1)
+        # raw_id lúc này sẽ là: "nguyen.van.chien .753743"
+        
+        # Xóa sạch dấu cách (do xuống dòng tạo ra)
+        clean_id = raw_id.replace(" ", "").strip()
+        
+        # Xóa các ký tự rác ở đầu/cuối nếu OCR đọc lố (ví dụ dấu chấm câu)
+        final_id = clean_id.strip(".,/")
+        
+    else:
+        # Fallback: Tìm dạng id=...
+        match_uid = re.search(r"id[\s=]+(\d+)", full_text)
+        if match_uid:
+            final_id = match_uid.group(1)
 
-    m = _FB_FROM_DOMAIN_RE.search(normalized)
-    if m:
-        raw = m.group(1)
-        final_id = raw.replace(" ", "").strip().rstrip(".")
-        if final_id:
-            return final_id
-
-    m2 = _FB_ID_PARAM_RE.search(normalized)
-    if m2:
-        return m2.group(1)
-
-    return None
-
+    return final_id
 
 def navigate_to_profile_popup(d, log: logging.Logger) -> bool:
     """
@@ -232,7 +253,7 @@ def get_facebook_id_via_ocr(d, reader, log: logging.Logger) -> Optional[str]:
         return None
 
     full_text = " ".join(lines).strip()
-    log.debug("Popup OCR raw: %s", full_text)
+    log.info("Popup OCR raw: %s", full_text)
 
     user_id = extract_facebook_id_from_ocr_text(full_text)
     log.info("OCR elapsed: %.2fs", time.time() - start)
